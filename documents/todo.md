@@ -1,3 +1,0 @@
-- load data from lower timeframe can switch timeframe dropdown
-- add indicator for parameters (ATR,EMA)
-- dynamic strategy rule in json format export
