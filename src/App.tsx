@@ -57,6 +57,16 @@ interface ClickedTimestamp {
   type: 'long' | 'short';
 }
 
+// Add interface for serialized timestamp
+interface SerializedClickedTimestamp {
+  time: number;
+  position: 'aboveBar' | 'belowBar';
+  color: string;
+  shape: 'circle' | 'square' | 'arrowUp' | 'arrowDown';
+  text: string;
+  type: 'long' | 'short';
+}
+
 const App: React.FC = () => {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -78,7 +88,64 @@ const App: React.FC = () => {
   const [dateRange, setDateRange] = useState<{ start: Date; end: Date } | null>(null);
   const [atrData, setAtrData] = useState<{ time: Time; value: number }[]>([]);
   const [emaData, setEmaData] = useState<{ time: Time; value: number }[]>([]);
-  const [clickedTimestamps, setClickedTimestamps] = useState<ClickedTimestamp[]>([]);
+  const [clickedTimestamps, setClickedTimestamps] = useState<ClickedTimestamp[]>(() => {
+    // Initialize state from local storage
+    const savedTimestamps = localStorage.getItem('clickedTimestamps');
+    if (savedTimestamps) {
+      try {
+        const parsedTimestamps: SerializedClickedTimestamp[] = JSON.parse(savedTimestamps);
+        return parsedTimestamps.map(ts => ({
+          ...ts,
+          time: ts.time as Time
+        }));
+      } catch (error) {
+        console.error('Error loading initial timestamps:', error);
+        return [];
+      }
+    }
+    return [];
+  });
+
+  // Add backtesting parameters state
+  const [backtestParams, setBacktestParams] = useState({
+    entryPrice: 'close' as 'close' | 'open' | 'low' | 'high',
+    stopLossType: 'atr' as 'atr' | 'close' | 'open' | 'low' | 'high',
+    stopLossATR: 2,
+    takeProfitMultiplier: 2,
+  });
+
+  // Effect to save timestamps to local storage
+  useEffect(() => {
+    if (clickedTimestamps.length > 0) {
+      const serializedTimestamps: SerializedClickedTimestamp[] = clickedTimestamps.map(ts => ({
+        ...ts,
+        time: Number(ts.time)
+      }));
+      localStorage.setItem('clickedTimestamps', JSON.stringify(serializedTimestamps));
+    } else {
+      localStorage.removeItem('clickedTimestamps');
+    }
+  }, [clickedTimestamps]);
+
+  // Effect to update chart markers when timestamps change
+  useEffect(() => {
+    const candlestickSeries = candlestickSeriesRef.current;
+    if (candlestickSeries && clickedTimestamps.length > 0) {
+      try {
+        candlestickSeries.setMarkers(
+          clickedTimestamps.map(ts => ({
+            time: ts.time,
+            position: ts.position,
+            color: ts.color,
+            shape: ts.shape,
+            text: ts.text,
+          }))
+        );
+      } catch (error) {
+        console.error('Error setting markers:', error);
+      }
+    }
+  }, [clickedTimestamps, isDarkMode]);
 
   // Add keyboard navigation
   useEffect(() => {
@@ -302,6 +369,24 @@ const App: React.FC = () => {
         
         candlestickSeries.setData(flattenedData);
         chart.timeScale().fitContent();
+        
+        // Apply markers after data is loaded
+        if (clickedTimestamps.length > 0) {
+          try {
+            candlestickSeries.setMarkers(
+              clickedTimestamps.map(ts => ({
+                time: ts.time,
+                position: ts.position,
+                color: ts.color,
+                shape: ts.shape,
+                text: ts.text,
+              }))
+            );
+          } catch (error) {
+            console.error('Error setting initial markers:', error);
+          }
+        }
+        
         setLoading(false);
       } catch (error) {
         console.error('Error loading data:', error);
@@ -313,8 +398,8 @@ const App: React.FC = () => {
     loadData();
 
     const handleResize = () => {
-      if (chartContainerRef.current) {
-        chart.applyOptions({
+      if (chartContainerRef.current && chartRef.current) {
+        chartRef.current.applyOptions({
           width: chartContainerRef.current.clientWidth,
         });
       }
@@ -324,8 +409,13 @@ const App: React.FC = () => {
 
     return () => {
       window.removeEventListener('resize', handleResize);
-      chart.remove();
-      chartRef.current = null;
+      if (chartRef.current) {
+        chartRef.current.remove();
+        chartRef.current = null;
+        candlestickSeriesRef.current = null;
+        atrSeriesRef.current = null;
+        emaSeriesRef.current = null;
+      }
     };
   }, [isDarkMode]);
 
@@ -412,21 +502,6 @@ const App: React.FC = () => {
       }
     }
   }, [showEMA, emaData]);
-
-  // Effect to update markers when clickedTimestamps changes
-  useEffect(() => {
-    if (candlestickSeriesRef.current && clickedTimestamps.length > 0) {
-      candlestickSeriesRef.current.setMarkers(
-        clickedTimestamps.map(ts => ({
-          time: ts.time,
-          position: ts.position,
-          color: ts.color,
-          shape: ts.shape,
-          text: ts.text,
-        }))
-      );
-    }
-  }, [clickedTimestamps, isDarkMode]);
 
   const toggleDarkMode = () => {
     setIsDarkMode(!isDarkMode);
@@ -546,6 +621,109 @@ const App: React.FC = () => {
 
         {clickedTimestamps.length > 0 && (
           <div className={`mt-4 p-4 rounded-lg ${isDarkMode ? 'bg-gray-800' : 'bg-white'} shadow-sm`}>
+            {/* Backtesting Parameters Panel */}
+            <div className="mb-6">
+              <h3 className={`text-lg font-semibold mb-4 ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
+                Backtesting Parameters
+              </h3>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {/* Entry Price Selection */}
+                <div className={`p-4 rounded-lg ${isDarkMode ? 'bg-gray-700' : 'bg-gray-100'}`}>
+                  <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                    Entry Price
+                  </label>
+                  <select
+                    value={backtestParams.entryPrice}
+                    onChange={(e) => setBacktestParams(prev => ({
+                      ...prev,
+                      entryPrice: e.target.value as 'close' | 'open' | 'low' | 'high'
+                    }))}
+                    className={`w-full rounded-md border ${
+                      isDarkMode 
+                        ? 'bg-gray-600 border-gray-500 text-white' 
+                        : 'bg-white border-gray-300 text-gray-900'
+                    } shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500`}
+                  >
+                    <option value="close">Close</option>
+                    <option value="open">Open</option>
+                    <option value="low">Low</option>
+                    <option value="high">High</option>
+                  </select>
+                </div>
+
+                {/* Stop Loss Type and Value */}
+                <div className={`p-4 rounded-lg ${isDarkMode ? 'bg-gray-700' : 'bg-gray-100'}`}>
+                  <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                    Stop Loss Type
+                  </label>
+                  <select
+                    value={backtestParams.stopLossType}
+                    onChange={(e) => setBacktestParams(prev => ({
+                      ...prev,
+                      stopLossType: e.target.value as 'atr' | 'close' | 'open' | 'low' | 'high'
+                    }))}
+                    className={`w-full rounded-md border ${
+                      isDarkMode 
+                        ? 'bg-gray-600 border-gray-500 text-white' 
+                        : 'bg-white border-gray-300 text-gray-900'
+                    } shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 mb-2`}
+                  >
+                    <option value="atr">ATR</option>
+                    <option value="close">Close</option>
+                    <option value="open">Open</option>
+                    <option value="low">Low</option>
+                    <option value="high">High</option>
+                  </select>
+                  
+                  {backtestParams.stopLossType === 'atr' && (
+                    <div className="mt-2">
+                      <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                        ATR Multiplier
+                      </label>
+                      <input
+                        type="number"
+                        min="0.1"
+                        step="0.1"
+                        value={backtestParams.stopLossATR}
+                        onChange={(e) => setBacktestParams(prev => ({
+                          ...prev,
+                          stopLossATR: parseFloat(e.target.value)
+                        }))}
+                        className={`w-full rounded-md border ${
+                          isDarkMode 
+                            ? 'bg-gray-600 border-gray-500 text-white' 
+                            : 'bg-white border-gray-300 text-gray-900'
+                        } shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500`}
+                      />
+                    </div>
+                  )}
+                </div>
+
+                {/* Take Profit Multiplier */}
+                <div className={`p-4 rounded-lg ${isDarkMode ? 'bg-gray-700' : 'bg-gray-100'}`}>
+                  <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                    Take Profit (x Stop Loss)
+                  </label>
+                  <input
+                    type="number"
+                    min="0.1"
+                    step="0.1"
+                    value={backtestParams.takeProfitMultiplier}
+                    onChange={(e) => setBacktestParams(prev => ({
+                      ...prev,
+                      takeProfitMultiplier: parseFloat(e.target.value)
+                    }))}
+                    className={`w-full rounded-md border ${
+                      isDarkMode 
+                        ? 'bg-gray-600 border-gray-500 text-white' 
+                        : 'bg-white border-gray-300 text-gray-900'
+                    } shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500`}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Existing Timestamps List */}
             <h3 className={`text-lg font-semibold mb-2 ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
               Marked Timestamps
             </h3>
