@@ -62,4 +62,4 @@ MIT License
 
 ## 🧪 Demo
 
-![Backtest Engine Screenshot](docs/screenshot.png)
+![Backtest Engine Screenshot](public/demo.png)
