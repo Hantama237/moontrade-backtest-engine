@@ -67,6 +67,20 @@ interface SerializedClickedTimestamp {
   type: 'long' | 'short';
 }
 
+// Add timeframe type
+type Timeframe = '5m' | '15m' | '30m' | '1h' | '2h' | '4h' | '1d';
+
+// Add timeframe to milliseconds mapping
+const timeframeToMs: Record<Timeframe, number> = {
+  '5m': 5 * 60 * 1000,
+  '15m': 15 * 60 * 1000,
+  '30m': 30 * 60 * 1000,
+  '1h': 60 * 60 * 1000,
+  '2h': 2 * 60 * 60 * 1000,
+  '4h': 4 * 60 * 60 * 1000,
+  '1d': 24 * 60 * 60 * 1000
+};
+
 const App: React.FC = () => {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -108,11 +122,61 @@ const App: React.FC = () => {
 
   // Add backtesting parameters state
   const [backtestParams, setBacktestParams] = useState({
-    entryPrice: 'close' as 'close' | 'open' | 'low' | 'high',
-    stopLossType: 'atr' as 'atr' | 'close' | 'open' | 'low' | 'high',
-    stopLossATR: 2,
-    takeProfitMultiplier: 2,
+    long: {
+      entryPrice: 'close' as 'close' | 'open' | 'low' | 'high',
+      stopLossType: 'open' as 'atr' | 'close' | 'open' | 'low' | 'high',
+      stopLossATR: 2,
+      takeProfitMultiplier: 2,
+    },
+    short: {
+      entryPrice: 'close' as 'close' | 'open' | 'low' | 'high',
+      stopLossType: 'open' as 'atr' | 'close' | 'open' | 'low' | 'high',
+      stopLossATR: 2,
+      takeProfitMultiplier: 2,
+    }
   });
+
+  const [timeframe, setTimeframe] = useState<Timeframe>('5m');
+  const [rawData, setRawData] = useState<CandleData[]>([]);
+
+  // Add function to aggregate data based on timeframe
+  const aggregateData = (data: CandleData[], targetTimeframe: Timeframe): CandleData[] => {
+    if (targetTimeframe === '5m') return data;
+
+    const timeframeMs = timeframeToMs[targetTimeframe];
+    const aggregatedData: CandleData[] = [];
+    let currentBucket: CandleData | null = null;
+
+    data.forEach(candle => {
+      const candleTime = Number(candle.time) * 1000; // Convert to milliseconds
+      const bucketTime = Math.floor(candleTime / timeframeMs) * timeframeMs;
+
+      if (!currentBucket || currentBucket.time !== (bucketTime / 1000) as Time) {
+        if (currentBucket) {
+          aggregatedData.push(currentBucket);
+        }
+        currentBucket = {
+          time: (bucketTime / 1000) as Time,
+          open: candle.open,
+          high: candle.high,
+          low: candle.low,
+          close: candle.close,
+          volume: candle.volume
+        };
+      } else {
+        currentBucket.high = Math.max(currentBucket.high, candle.high);
+        currentBucket.low = Math.min(currentBucket.low, candle.low);
+        currentBucket.close = candle.close;
+        currentBucket.volume += candle.volume;
+      }
+    });
+
+    if (currentBucket) {
+      aggregatedData.push(currentBucket);
+    }
+
+    return aggregatedData;
+  };
 
   // Effect to save timestamps to local storage
   useEffect(() => {
@@ -233,16 +297,27 @@ const App: React.FC = () => {
     // Load and process CSV data
     const loadData = async () => {
       try {
-        // Fetch the manifest file that lists all available CSV files
-        const manifestResponse = await fetch('historical/manifest.json');
-        if (!manifestResponse.ok) {
-          throw new Error('Failed to fetch file manifest');
-        }
-        const manifest: FileManifest = await manifestResponse.json();
-        const files = manifest.files.map(file => `historical/${file}`);
+        // List of CSV files to load
+        const files = [
+          'historical5m/ETHUSDT-5m-2024-01.csv',
+          'historical5m/ETHUSDT-5m-2024-02.csv',
+          'historical5m/ETHUSDT-5m-2024-03.csv',
+          'historical5m/ETHUSDT-5m-2024-04.csv',
+          'historical5m/ETHUSDT-5m-2024-05.csv',
+          'historical5m/ETHUSDT-5m-2024-06.csv',
+          'historical5m/ETHUSDT-5m-2024-07.csv',
+          'historical5m/ETHUSDT-5m-2024-08.csv',
+          'historical5m/ETHUSDT-5m-2024-09.csv',
+          'historical5m/ETHUSDT-5m-2024-10.csv',
+          'historical5m/ETHUSDT-5m-2024-11.csv',
+          'historical5m/ETHUSDT-5m-2024-12.csv',
+          'historical5m/ETHUSDT-5m-2025-01.csv',
+          'historical5m/ETHUSDT-5m-2025-02.csv',
+          'historical5m/ETHUSDT-5m-2025-03.csv'
+        ];
 
         if (files.length === 0) {
-          throw new Error('No CSV files found in the manifest');
+          throw new Error('No CSV files found');
         }
 
         console.log(`Loading ${files.length} files...`);
@@ -317,7 +392,10 @@ const App: React.FC = () => {
         // Sort data by time
         flattenedData.sort((a, b) => Number(a.time) - Number(b.time));
         
-        // Calculate ATR using technicalindicators library
+        // Store raw data
+        setRawData(flattenedData);
+
+        // Calculate ATR and EMA using raw data
         const atrPeriod = 14;
         const atrResult = ATR.calculate({
           high: flattenedData.map(d => d.high),
@@ -326,20 +404,18 @@ const App: React.FC = () => {
           period: atrPeriod
         });
 
-        // Calculate EMA using technicalindicators library
         const emaPeriod = 37;
         const emaResult = EMA.calculate({
           values: flattenedData.map(d => d.close),
           period: emaPeriod
         });
 
-        // Map ATR values to the required format
+        // Map ATR and EMA values
         const atrValues = flattenedData.slice(atrPeriod - 1).map((candle, index) => ({
           time: candle.time,
           value: atrResult[index]
         }));
 
-        // Map EMA values to the required format
         const emaValues = flattenedData.slice(emaPeriod - 1).map((candle, index) => ({
           time: candle.time,
           value: emaResult[index]
@@ -418,6 +494,55 @@ const App: React.FC = () => {
       }
     };
   }, [isDarkMode]);
+
+  // Add effect to update chart data when timeframe changes
+  useEffect(() => {
+    if (rawData.length === 0) return;
+
+    const aggregatedData = aggregateData(rawData, timeframe);
+    
+    if (candlestickSeriesRef.current) {
+      candlestickSeriesRef.current.setData(aggregatedData);
+      if (chartRef.current) {
+        chartRef.current.timeScale().fitContent();
+      }
+    }
+
+    // Recalculate indicators for the new timeframe
+    const atrPeriod = 14;
+    const atrResult = ATR.calculate({
+      high: aggregatedData.map(d => d.high),
+      low: aggregatedData.map(d => d.low),
+      close: aggregatedData.map(d => d.close),
+      period: atrPeriod
+    });
+
+    const emaPeriod = 37;
+    const emaResult = EMA.calculate({
+      values: aggregatedData.map(d => d.close),
+      period: emaPeriod
+    });
+
+    const atrValues = aggregatedData.slice(atrPeriod - 1).map((candle, index) => ({
+      time: candle.time,
+      value: atrResult[index]
+    }));
+
+    const emaValues = aggregatedData.slice(emaPeriod - 1).map((candle, index) => ({
+      time: candle.time,
+      value: emaResult[index]
+    }));
+
+    setAtrData(atrValues);
+    setEmaData(emaValues);
+
+    if (atrSeriesRef.current && showATR) {
+      atrSeriesRef.current.setData(atrValues);
+    }
+    if (emaSeriesRef.current && showEMA) {
+      emaSeriesRef.current.setData(emaValues);
+    }
+  }, [timeframe, rawData]);
 
   // Add click handler effect that depends on isLongMark
   useEffect(() => {
@@ -524,6 +649,26 @@ const App: React.FC = () => {
               <h1 className={`text-3xl font-bold ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
                 ETH/USDT Chart
               </h1>
+              {/* Add Timeframe Selector */}
+              <div className="mt-2">
+                <select
+                  value={timeframe}
+                  onChange={(e) => setTimeframe(e.target.value as Timeframe)}
+                  className={`rounded-md border ${
+                    isDarkMode 
+                      ? 'bg-gray-700 border-gray-600 text-white' 
+                      : 'bg-white border-gray-300 text-gray-900'
+                  } shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500`}
+                >
+                  <option value="5m">5 Minutes</option>
+                  <option value="15m">15 Minutes</option>
+                  <option value="30m">30 Minutes</option>
+                  <option value="1h">1 Hour</option>
+                  <option value="2h">2 Hours</option>
+                  <option value="4h">4 Hours</option>
+                  <option value="1d">1 Day</option>
+                </select>
+              </div>
               {currentPrice && (
                 <div className="mt-2">
                   <span className={`text-2xl font-semibold ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
@@ -626,99 +771,232 @@ const App: React.FC = () => {
               <h3 className={`text-lg font-semibold mb-4 ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
                 Backtesting Parameters
               </h3>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                {/* Entry Price Selection */}
-                <div className={`p-4 rounded-lg ${isDarkMode ? 'bg-gray-700' : 'bg-gray-100'}`}>
-                  <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
-                    Entry Price
-                  </label>
-                  <select
-                    value={backtestParams.entryPrice}
-                    onChange={(e) => setBacktestParams(prev => ({
-                      ...prev,
-                      entryPrice: e.target.value as 'close' | 'open' | 'low' | 'high'
-                    }))}
-                    className={`w-full rounded-md border ${
-                      isDarkMode 
-                        ? 'bg-gray-600 border-gray-500 text-white' 
-                        : 'bg-white border-gray-300 text-gray-900'
-                    } shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500`}
-                  >
-                    <option value="close">Close</option>
-                    <option value="open">Open</option>
-                    <option value="low">Low</option>
-                    <option value="high">High</option>
-                  </select>
-                </div>
+              
+              {/* Long Parameters */}
+              <div className={`mb-6 p-4 rounded-lg ${isDarkMode ? 'bg-gray-700' : 'bg-gray-100'}`}>
+                <h4 className={`text-md font-semibold mb-4 ${isDarkMode ? 'text-green-400' : 'text-green-600'}`}>
+                  Long Trades
+                </h4>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {/* Long Entry Price Selection */}
+                  <div className={`p-4 rounded-lg ${isDarkMode ? 'bg-gray-600' : 'bg-white'}`}>
+                    <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                      Entry Price
+                    </label>
+                    <select
+                      value={backtestParams.long.entryPrice}
+                      onChange={(e) => setBacktestParams(prev => ({
+                        ...prev,
+                        long: {
+                          ...prev.long,
+                          entryPrice: e.target.value as 'close' | 'open' | 'low' | 'high'
+                        }
+                      }))}
+                      className={`w-full rounded-md border ${
+                        isDarkMode 
+                          ? 'bg-gray-500 border-gray-400 text-white' 
+                          : 'bg-white border-gray-300 text-gray-900'
+                      } shadow-sm focus:ring-2 focus:ring-green-500 focus:border-green-500`}
+                    >
+                      <option value="close">Close</option>
+                      <option value="open">Open</option>
+                      <option value="low">Low</option>
+                      <option value="high">High</option>
+                    </select>
+                  </div>
 
-                {/* Stop Loss Type and Value */}
-                <div className={`p-4 rounded-lg ${isDarkMode ? 'bg-gray-700' : 'bg-gray-100'}`}>
-                  <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
-                    Stop Loss Type
-                  </label>
-                  <select
-                    value={backtestParams.stopLossType}
-                    onChange={(e) => setBacktestParams(prev => ({
-                      ...prev,
-                      stopLossType: e.target.value as 'atr' | 'close' | 'open' | 'low' | 'high'
-                    }))}
-                    className={`w-full rounded-md border ${
-                      isDarkMode 
-                        ? 'bg-gray-600 border-gray-500 text-white' 
-                        : 'bg-white border-gray-300 text-gray-900'
-                    } shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 mb-2`}
-                  >
-                    <option value="atr">ATR</option>
-                    <option value="close">Close</option>
-                    <option value="open">Open</option>
-                    <option value="low">Low</option>
-                    <option value="high">High</option>
-                  </select>
-                  
-                  {backtestParams.stopLossType === 'atr' && (
-                    <div className="mt-2">
-                      <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
-                        ATR Multiplier
-                      </label>
-                      <input
-                        type="number"
-                        min="0.1"
-                        step="0.1"
-                        value={backtestParams.stopLossATR}
-                        onChange={(e) => setBacktestParams(prev => ({
-                          ...prev,
-                          stopLossATR: parseFloat(e.target.value)
-                        }))}
-                        className={`w-full rounded-md border ${
-                          isDarkMode 
-                            ? 'bg-gray-600 border-gray-500 text-white' 
-                            : 'bg-white border-gray-300 text-gray-900'
-                        } shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500`}
-                      />
-                    </div>
-                  )}
-                </div>
+                  {/* Long Stop Loss Type and Value */}
+                  <div className={`p-4 rounded-lg ${isDarkMode ? 'bg-gray-600' : 'bg-white'}`}>
+                    <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                      Stop Loss Type
+                    </label>
+                    <select
+                      value={backtestParams.long.stopLossType}
+                      onChange={(e) => setBacktestParams(prev => ({
+                        ...prev,
+                        long: {
+                          ...prev.long,
+                          stopLossType: e.target.value as 'atr' | 'close' | 'open' | 'low' | 'high'
+                        }
+                      }))}
+                      className={`w-full rounded-md border ${
+                        isDarkMode 
+                          ? 'bg-gray-500 border-gray-400 text-white' 
+                          : 'bg-white border-gray-300 text-gray-900'
+                      } shadow-sm focus:ring-2 focus:ring-green-500 focus:border-green-500 mb-2`}
+                    >
+                      <option value="atr">ATR</option>
+                      <option value="close">Close</option>
+                      <option value="open">Open</option>
+                      <option value="low">Low</option>
+                      <option value="high">High</option>
+                    </select>
+                    
+                    {backtestParams.long.stopLossType === 'atr' && (
+                      <div className="mt-2">
+                        <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                          ATR Multiplier
+                        </label>
+                        <input
+                          type="number"
+                          min="0.1"
+                          step="0.1"
+                          value={backtestParams.long.stopLossATR}
+                          onChange={(e) => setBacktestParams(prev => ({
+                            ...prev,
+                            long: {
+                              ...prev.long,
+                              stopLossATR: parseFloat(e.target.value)
+                            }
+                          }))}
+                          className={`w-full rounded-md border ${
+                            isDarkMode 
+                              ? 'bg-gray-500 border-gray-400 text-white' 
+                              : 'bg-white border-gray-300 text-gray-900'
+                          } shadow-sm focus:ring-2 focus:ring-green-500 focus:border-green-500`}
+                        />
+                      </div>
+                    )}
+                  </div>
 
-                {/* Take Profit Multiplier */}
-                <div className={`p-4 rounded-lg ${isDarkMode ? 'bg-gray-700' : 'bg-gray-100'}`}>
-                  <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
-                    Take Profit (x Stop Loss)
-                  </label>
-                  <input
-                    type="number"
-                    min="0.1"
-                    step="0.1"
-                    value={backtestParams.takeProfitMultiplier}
-                    onChange={(e) => setBacktestParams(prev => ({
-                      ...prev,
-                      takeProfitMultiplier: parseFloat(e.target.value)
-                    }))}
-                    className={`w-full rounded-md border ${
-                      isDarkMode 
-                        ? 'bg-gray-600 border-gray-500 text-white' 
-                        : 'bg-white border-gray-300 text-gray-900'
-                    } shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500`}
-                  />
+                  {/* Long Take Profit Multiplier */}
+                  <div className={`p-4 rounded-lg ${isDarkMode ? 'bg-gray-600' : 'bg-white'}`}>
+                    <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                      Take Profit (x Stop Loss)
+                    </label>
+                    <input
+                      type="number"
+                      min="0.1"
+                      step="0.1"
+                      value={backtestParams.long.takeProfitMultiplier}
+                      onChange={(e) => setBacktestParams(prev => ({
+                        ...prev,
+                        long: {
+                          ...prev.long,
+                          takeProfitMultiplier: parseFloat(e.target.value)
+                        }
+                      }))}
+                      className={`w-full rounded-md border ${
+                        isDarkMode 
+                          ? 'bg-gray-500 border-gray-400 text-white' 
+                          : 'bg-white border-gray-300 text-gray-900'
+                      } shadow-sm focus:ring-2 focus:ring-green-500 focus:border-green-500`}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Short Parameters */}
+              <div className={`p-4 rounded-lg ${isDarkMode ? 'bg-gray-700' : 'bg-gray-100'}`}>
+                <h4 className={`text-md font-semibold mb-4 ${isDarkMode ? 'text-red-400' : 'text-red-600'}`}>
+                  Short Trades
+                </h4>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {/* Short Entry Price Selection */}
+                  <div className={`p-4 rounded-lg ${isDarkMode ? 'bg-gray-600' : 'bg-white'}`}>
+                    <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                      Entry Price
+                    </label>
+                    <select
+                      value={backtestParams.short.entryPrice}
+                      onChange={(e) => setBacktestParams(prev => ({
+                        ...prev,
+                        short: {
+                          ...prev.short,
+                          entryPrice: e.target.value as 'close' | 'open' | 'low' | 'high'
+                        }
+                      }))}
+                      className={`w-full rounded-md border ${
+                        isDarkMode 
+                          ? 'bg-gray-500 border-gray-400 text-white' 
+                          : 'bg-white border-gray-300 text-gray-900'
+                      } shadow-sm focus:ring-2 focus:ring-red-500 focus:border-red-500`}
+                    >
+                      <option value="close">Close</option>
+                      <option value="open">Open</option>
+                      <option value="low">Low</option>
+                      <option value="high">High</option>
+                    </select>
+                  </div>
+
+                  {/* Short Stop Loss Type and Value */}
+                  <div className={`p-4 rounded-lg ${isDarkMode ? 'bg-gray-600' : 'bg-white'}`}>
+                    <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                      Stop Loss Type
+                    </label>
+                    <select
+                      value={backtestParams.short.stopLossType}
+                      onChange={(e) => setBacktestParams(prev => ({
+                        ...prev,
+                        short: {
+                          ...prev.short,
+                          stopLossType: e.target.value as 'atr' | 'close' | 'open' | 'low' | 'high'
+                        }
+                      }))}
+                      className={`w-full rounded-md border ${
+                        isDarkMode 
+                          ? 'bg-gray-500 border-gray-400 text-white' 
+                          : 'bg-white border-gray-300 text-gray-900'
+                      } shadow-sm focus:ring-2 focus:ring-red-500 focus:border-red-500 mb-2`}
+                    >
+                      <option value="atr">ATR</option>
+                      <option value="close">Close</option>
+                      <option value="open">Open</option>
+                      <option value="low">Low</option>
+                      <option value="high">High</option>
+                    </select>
+                    
+                    {backtestParams.short.stopLossType === 'atr' && (
+                      <div className="mt-2">
+                        <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                          ATR Multiplier
+                        </label>
+                        <input
+                          type="number"
+                          min="0.1"
+                          step="0.1"
+                          value={backtestParams.short.stopLossATR}
+                          onChange={(e) => setBacktestParams(prev => ({
+                            ...prev,
+                            short: {
+                              ...prev.short,
+                              stopLossATR: parseFloat(e.target.value)
+                            }
+                          }))}
+                          className={`w-full rounded-md border ${
+                            isDarkMode 
+                              ? 'bg-gray-500 border-gray-400 text-white' 
+                              : 'bg-white border-gray-300 text-gray-900'
+                          } shadow-sm focus:ring-2 focus:ring-red-500 focus:border-red-500`}
+                        />
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Short Take Profit Multiplier */}
+                  <div className={`p-4 rounded-lg ${isDarkMode ? 'bg-gray-600' : 'bg-white'}`}>
+                    <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                      Take Profit (x Stop Loss)
+                    </label>
+                    <input
+                      type="number"
+                      min="0.1"
+                      step="0.1"
+                      value={backtestParams.short.takeProfitMultiplier}
+                      onChange={(e) => setBacktestParams(prev => ({
+                        ...prev,
+                        short: {
+                          ...prev.short,
+                          takeProfitMultiplier: parseFloat(e.target.value)
+                        }
+                      }))}
+                      className={`w-full rounded-md border ${
+                        isDarkMode 
+                          ? 'bg-gray-500 border-gray-400 text-white' 
+                          : 'bg-white border-gray-300 text-gray-900'
+                      } shadow-sm focus:ring-2 focus:ring-red-500 focus:border-red-500`}
+                    />
+                  </div>
                 </div>
               </div>
             </div>
