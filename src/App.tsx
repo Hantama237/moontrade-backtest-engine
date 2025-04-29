@@ -81,6 +81,16 @@ const timeframeToMs: Record<Timeframe, number> = {
   '1d': 24 * 60 * 60 * 1000
 };
 
+// Position type
+interface Position {
+  entryTimestamp: Time;
+  entryPrice: number;
+  stopLossPrice: number;
+  takeProfitPrice: number;
+  type: 'long' | 'short';
+  params: any;
+}
+
 const App: React.FC = () => {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -121,23 +131,55 @@ const App: React.FC = () => {
   });
 
   // Add backtesting parameters state
-  const [backtestParams, setBacktestParams] = useState({
-    long: {
-      entryPrice: 'close' as 'close' | 'open' | 'low' | 'high',
-      stopLossType: 'open' as 'atr' | 'close' | 'open' | 'low' | 'high',
-      stopLossATR: 2,
-      takeProfitMultiplier: 2,
-    },
-    short: {
-      entryPrice: 'close' as 'close' | 'open' | 'low' | 'high',
-      stopLossType: 'open' as 'atr' | 'close' | 'open' | 'low' | 'high',
-      stopLossATR: 2,
-      takeProfitMultiplier: 2,
+  const [backtestParams, setBacktestParams] = useState(() => {
+    const saved = localStorage.getItem('backtestParams');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch {
+        // fallback to default
+      }
     }
+    return {
+      long: {
+        entryPrice: 'close' as 'close' | 'open' | 'low' | 'high',
+        stopLossType: 'open' as 'atr' | 'close' | 'open' | 'low' | 'high',
+        stopLossATR: 2,
+        takeProfitMultiplier: 2,
+      },
+      short: {
+        entryPrice: 'close' as 'close' | 'open' | 'low' | 'high',
+        stopLossType: 'open' as 'atr' | 'close' | 'open' | 'low' | 'high',
+        stopLossATR: 2,
+        takeProfitMultiplier: 2,
+      }
+    };
   });
 
-  const [timeframe, setTimeframe] = useState<Timeframe>('5m');
+  // Persist backtestParams to localStorage
+  useEffect(() => {
+    localStorage.setItem('backtestParams', JSON.stringify(backtestParams));
+  }, [backtestParams]);
+
+  const [timeframe, setTimeframe] = useState<Timeframe>(() => {
+    const saved = localStorage.getItem('timeframe');
+    if (saved && ['5m','15m','30m','1h','2h','4h','1d'].includes(saved)) {
+      return saved as Timeframe;
+    }
+    return '5m';
+  });
+
+  useEffect(() => {
+    localStorage.setItem('timeframe', timeframe);
+  }, [timeframe]);
+
   const [rawData, setRawData] = useState<CandleData[]>([]);
+  const [positions, setPositions] = useState<Position[]>([]);
+
+  // Helper to get candle by timestamp
+  const getCandleByTime = (time: Time) => rawData.find(c => Number(c.time) === Number(time));
+  // Helper to get ATR by timestamp
+  const getATRByTime = (time: Time) => atrData.find(a => Number(a.time) === Number(time))?.value;
 
   // Add function to aggregate data based on timeframe
   const aggregateData = (data: CandleData[], targetTimeframe: Timeframe): CandleData[] => {
@@ -628,6 +670,47 @@ const App: React.FC = () => {
     }
   }, [showEMA, emaData]);
 
+  useEffect(() => {
+    if (!rawData.length || !clickedTimestamps.length) {
+      setPositions([]);
+      return;
+    }
+    const newPositions: Position[] = clickedTimestamps.map(ts => {
+      const candle = getCandleByTime(ts.time);
+      if (!candle) return null;
+      const isLong = ts.type === 'long';
+      const params = ts.type === 'long' ? backtestParams.long : backtestParams.short;
+      // Entry price
+      const entryPrice = Number(candle[params.entryPrice as keyof CandleData]);
+      // Stop loss
+      let stopLossPrice: number;
+      if (params.stopLossType === 'atr') {
+        const atr = getATRByTime(ts.time) ?? 0;
+        stopLossPrice = isLong
+          ? Number(entryPrice) - Number(params.stopLossATR) * Number(atr)
+          : Number(entryPrice) + Number(params.stopLossATR) * Number(atr);
+      } else {
+        stopLossPrice = Number(candle[params.stopLossType as keyof CandleData]);
+      }
+      // Take profit
+      let takeProfitPrice: number;
+      if (isLong) {
+        takeProfitPrice = Number(entryPrice) + (Math.abs(Number(entryPrice) - Number(stopLossPrice)) * Number(params.takeProfitMultiplier));
+      } else {
+        takeProfitPrice = Number(entryPrice) - (Math.abs(Number(entryPrice) - Number(stopLossPrice)) * Number(params.takeProfitMultiplier));
+      }
+      return {
+        entryTimestamp: ts.time,
+        entryPrice,
+        stopLossPrice,
+        takeProfitPrice,
+        type: ts.type,
+        params: { ...params },
+      };
+    }).filter(Boolean) as Position[];
+    setPositions(newPositions);
+  }, [clickedTimestamps, rawData, atrData, backtestParams]);
+
   const toggleDarkMode = () => {
     setIsDarkMode(!isDarkMode);
   };
@@ -641,7 +724,7 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className={`min-h-screen ${isDarkMode ? 'bg-gray-900' : 'bg-gray-50'} transition-colors duration-200`}>
+    <div className={`${isDarkMode ? 'bg-gray-900' : 'bg-gray-50'} transition-colors duration-200`}>
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <header className="mb-8">
           <div className="flex justify-between items-center">
@@ -785,7 +868,7 @@ const App: React.FC = () => {
                     </label>
                     <select
                       value={backtestParams.long.entryPrice}
-                      onChange={(e) => setBacktestParams(prev => ({
+                      onChange={(e) => setBacktestParams((prev: typeof backtestParams) => ({
                         ...prev,
                         long: {
                           ...prev.long,
@@ -812,7 +895,7 @@ const App: React.FC = () => {
                     </label>
                     <select
                       value={backtestParams.long.stopLossType}
-                      onChange={(e) => setBacktestParams(prev => ({
+                      onChange={(e) => setBacktestParams((prev: typeof backtestParams) => ({
                         ...prev,
                         long: {
                           ...prev.long,
@@ -842,7 +925,7 @@ const App: React.FC = () => {
                           min="0.1"
                           step="0.1"
                           value={backtestParams.long.stopLossATR}
-                          onChange={(e) => setBacktestParams(prev => ({
+                          onChange={(e) => setBacktestParams((prev: typeof backtestParams) => ({
                             ...prev,
                             long: {
                               ...prev.long,
@@ -869,7 +952,7 @@ const App: React.FC = () => {
                       min="0.1"
                       step="0.1"
                       value={backtestParams.long.takeProfitMultiplier}
-                      onChange={(e) => setBacktestParams(prev => ({
+                      onChange={(e) => setBacktestParams((prev: typeof backtestParams) => ({
                         ...prev,
                         long: {
                           ...prev.long,
@@ -899,7 +982,7 @@ const App: React.FC = () => {
                     </label>
                     <select
                       value={backtestParams.short.entryPrice}
-                      onChange={(e) => setBacktestParams(prev => ({
+                      onChange={(e) => setBacktestParams((prev: typeof backtestParams) => ({
                         ...prev,
                         short: {
                           ...prev.short,
@@ -926,7 +1009,7 @@ const App: React.FC = () => {
                     </label>
                     <select
                       value={backtestParams.short.stopLossType}
-                      onChange={(e) => setBacktestParams(prev => ({
+                      onChange={(e) => setBacktestParams((prev: typeof backtestParams) => ({
                         ...prev,
                         short: {
                           ...prev.short,
@@ -956,7 +1039,7 @@ const App: React.FC = () => {
                           min="0.1"
                           step="0.1"
                           value={backtestParams.short.stopLossATR}
-                          onChange={(e) => setBacktestParams(prev => ({
+                          onChange={(e) => setBacktestParams((prev: typeof backtestParams) => ({
                             ...prev,
                             short: {
                               ...prev.short,
@@ -983,7 +1066,7 @@ const App: React.FC = () => {
                       min="0.1"
                       step="0.1"
                       value={backtestParams.short.takeProfitMultiplier}
-                      onChange={(e) => setBacktestParams(prev => ({
+                      onChange={(e) => setBacktestParams((prev: typeof backtestParams) => ({
                         ...prev,
                         short: {
                           ...prev.short,
@@ -1006,39 +1089,75 @@ const App: React.FC = () => {
               Marked Timestamps
             </h3>
             <div className="space-y-2">
-              {clickedTimestamps.map((ts, index) => (
-                <div 
-                  key={index} 
-                  className={`flex items-center justify-between p-2 rounded ${
-                    isDarkMode ? 'bg-gray-700' : 'bg-gray-100'
-                  }`}
-                >
-                  <div className="flex items-center space-x-2">
-                    <span className={`px-2 py-1 rounded text-xs font-medium ${
-                      ts.type === 'long' 
-                        ? (isDarkMode ? 'bg-green-900 text-green-300' : 'bg-green-100 text-green-800')
-                        : (isDarkMode ? 'bg-red-900 text-red-300' : 'bg-red-100 text-red-800')
-                    }`}>
-                      {ts.type === 'long' ? 'Long' : 'Short'}
-                    </span>
-                    <span className={isDarkMode ? 'text-gray-300' : 'text-gray-700'}>
-                      {ts.text}
-                    </span>
-                  </div>
-                  <button
-                    onClick={() => {
-                      setClickedTimestamps(prev => prev.filter((_, i) => i !== index));
-                    }}
-                    className={`p-1 rounded-full ${
-                      isDarkMode ? 'text-gray-400 hover:text-red-400' : 'text-gray-500 hover:text-red-500'
-                    }`}
+              {clickedTimestamps.map((ts, index) => {
+                const pos = positions.find(p => Number(p.entryTimestamp) === Number(ts.time) && p.type === ts.type);
+                return (
+                  <div 
+                    key={index} 
+                    className={`flex flex-col md:flex-row md:items-center md:justify-between p-2 rounded ${
+                      isDarkMode ? 'bg-gray-700' : 'bg-gray-100'
+                    } relative group`}
                   >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
-                </div>
-              ))}
+                    <div className="flex items-center space-x-2">
+                      <span className={`px-2 py-1 rounded text-xs font-medium ${
+                        ts.type === 'long' 
+                          ? (isDarkMode ? 'bg-green-900 text-green-300' : 'bg-green-100 text-green-800')
+                          : (isDarkMode ? 'bg-red-900 text-red-300' : 'bg-red-100 text-red-800')
+                      }`}>
+                        {ts.type === 'long' ? 'Long' : 'Short'}
+                      </span>
+                      <span className={isDarkMode ? 'text-gray-300' : 'text-gray-700'}>
+                        {ts.text}
+                      </span>
+                    </div>
+                    {pos && (
+                      <>
+                        <div className="flex flex-wrap gap-4 mt-2 md:mt-0 md:ml-4 text-xs">
+                          <span className={isDarkMode ? 'text-gray-300' : 'text-gray-700'}>
+                            Entry: <span className="font-mono">{pos.entryPrice.toFixed(2)}</span>
+                          </span>
+                          <span className={isLongMark ? 'text-red-400' : 'text-red-700'}>
+                            SL: <span className="font-mono">{pos.stopLossPrice.toFixed(2)}</span>
+                          </span>
+                          <span className={isLongMark ? 'text-green-400' : 'text-green-700'}>
+                            TP: <span className="font-mono">{pos.takeProfitPrice.toFixed(2)}</span>
+                          </span>
+                        </div>
+                        {/* Tooltip for parameter summary */}
+                        {(() => { const atrValue = atrData.find(a => Number(a.time) === Number(pos.entryTimestamp))?.value; return (
+                        <div className="absolute left-0 top-full z-10 mt-2 w-max min-w-[220px] max-w-xs p-3 rounded-lg shadow-lg border text-xs transition-opacity duration-200 opacity-0 group-hover:opacity-100 pointer-events-none
+                          bg-white text-gray-900 dark:bg-gray-900 dark:text-gray-100 border-gray-200 dark:border-gray-700">
+                          <div className="mb-1 font-semibold">Backtest Parameters</div>
+                          <div>Entry Price Type: <span className="font-mono">{pos.params.entryPrice}</span></div>
+                          <div>Stop Loss Type: <span className="font-mono">{pos.params.stopLossType}</span></div>
+                          {pos.params.stopLossType === 'atr' && (
+                            <div>ATR Multiplier: <span className="font-mono">{pos.params.stopLossATR}</span></div>
+                          )}
+                          {typeof atrValue !== 'undefined' && (
+                            <div>ATR at Entry: <span className="font-mono">{atrValue.toFixed(2)}</span></div>
+                          )}
+                          <div>Take Profit Multiplier: <span className="font-mono">{pos.params.takeProfitMultiplier}</span></div>
+                          <div>Mark Type: <span className="font-mono">{pos.type}</span></div>
+                          <div className="mt-1 text-gray-400 dark:text-gray-500">Entry: {pos.entryPrice.toFixed(2)} | SL: {pos.stopLossPrice.toFixed(2)} | TP: {pos.takeProfitPrice.toFixed(2)}</div>
+                        </div>
+                        ); })()}
+                      </>
+                    )}
+                    <button
+                      onClick={() => {
+                        setClickedTimestamps(prev => prev.filter((_, i) => i !== index));
+                      }}
+                      className={`p-1 rounded-full ${
+                        isDarkMode ? 'text-gray-400 hover:text-red-400' : 'text-gray-500 hover:text-red-500'
+                      } md:ml-4 mt-2 md:mt-0`}
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
