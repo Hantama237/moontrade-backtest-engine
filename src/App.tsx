@@ -545,9 +545,12 @@ const App: React.FC = () => {
     
     if (candlestickSeriesRef.current) {
       candlestickSeriesRef.current.setData(aggregatedData);
-      if (chartRef.current) {
-        chartRef.current.timeScale().fitContent();
-      }
+      // Ensure the chart fits the visible range after setting data and timeframe
+      setTimeout(() => {
+        if (chartRef.current) {
+          chartRef.current.timeScale().fitContent();
+        }
+      }, 500);
     }
 
     // Recalculate indicators for the new timeframe
@@ -838,7 +841,7 @@ const App: React.FC = () => {
 
         <div 
           ref={chartContainerRef} 
-          className={`w-full rounded-lg shadow-lg overflow-hidden ${
+          className={`w-full rounded-lg shadow-lg overflow-auto ${
             isDarkMode ? 'bg-gray-800' : 'bg-white'
           } transition-colors duration-200`}
         />
